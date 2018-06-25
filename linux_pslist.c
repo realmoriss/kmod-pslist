@@ -198,8 +198,14 @@ long pagefault_mem_range(struct task_struct *task, unsigned long start_address,
 	// This is the number of pages for the address range
 	page_count = (address_range / PAGE_SIZE) + 1;
 	// Do page fault for all pages
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(4, 6, 3)
 	user_pages = get_user_pages_remote(task, task->mm, start_address,
 					   page_count, 0, 1, NULL, NULL);
+#else
+	int lock = 0;
+	user_pages = get_user_pages_remote(task, task->mm, start_address,
+					   page_count, 0, NULL, NULL, &lock);
+#endif
 
 	if (IS_ERR_VALUE(user_pages))
 		return user_pages;
@@ -246,13 +252,13 @@ long hash_mem_region(struct task_struct *task, unsigned long start_address,
 		return -ENOMEM;
 
 	// Get the pages
-#if LINUX_VERSION_CODE <= KERNEL_VERSION(4,6,3)
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(4, 6, 3)
 	result = get_user_pages_remote(task, task->mm, start_address,
 				       page_count, 0, 1, pages, NULL);
 #else
 	int lock = 0;
 	result = get_user_pages_remote(task, task->mm, start_address,
-		page_count, 0, pages, NULL, &lock);
+				       page_count, 0, pages, NULL, &lock);
 #endif
 	if (IS_ERR_VALUE(result))
 		goto out_free_pages;
@@ -319,13 +325,13 @@ long read_mem_region(struct task_struct *task, unsigned long start_address,
 		return -ENOMEM;
 
 	// Get the pages
-#if LINUX_VERSION_CODE <= KERNEL_VERSION(4,6,3)
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(4, 6, 3)
 	result = get_user_pages_remote(task, task->mm, start_address,
 				       page_count, 0, 1, pages, NULL);
 #else
 	int lock = 0;
 	result = get_user_pages_remote(task, task->mm, start_address,
-		page_count, 0, pages, NULL, &lock);
+				       page_count, 0, pages, NULL, &lock);
 #endif
 
 	if (IS_ERR_VALUE(result))
