@@ -8,8 +8,9 @@
 #include <linux/kobject.h>
 #include <linux/sysfs.h>
 #include <linux/fs_struct.h>
+#include <linux/version.h>
 
-MODULE_LICENSE("GPL v2");
+MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Istvan Telek <moriss@realmoriss.me>");
 
 /* User defines */
@@ -29,8 +30,6 @@ static struct sdesc *init_sdesc(struct crypto_shash *alg);
 
 int snprintf_bytearray(char *buf, unsigned long maxlen, unsigned char *arr,
 		       unsigned long len);
-
-struct page *get_page_of_address(struct mm_struct *mm, unsigned long address);
 
 long hash_mem_region(struct task_struct *task, unsigned long start_address,
 		     unsigned long end_address, unsigned char *digest);
@@ -126,41 +125,6 @@ void destroy_hasher(void)
 		_shash_desc = NULL;
 	}
 }
-
-/**
- * Traverses the page directory to find the page for the given address.
- */
-struct page *get_page_of_address(struct mm_struct *mm, unsigned long address)
-{
-	pgd_t *pgd;
-	pud_t *pud;
-	pmd_t *pmd;
-	pte_t *pte;
-
-	if (!mm)
-		return ERR_PTR(-EINVAL);
-
-	pgd = pgd_offset(mm, address);
-	if (pgd_none(*pgd) || unlikely(pgd_bad(*pgd)))
-		return ERR_PTR(-EFAULT);
-
-	pud = pud_offset(pgd, address);
-	if (pud_none(*pud) || unlikely(pud_bad(*pud)))
-		return ERR_PTR(-EFAULT);
-
-	pmd = pmd_offset(pud, address);
-	if (pmd_none(*pmd))
-		return ERR_PTR(-EFAULT);
-
-	pte = pte_offset_kernel(pmd, address);
-
-	if (!pte)
-		return ERR_PTR(-EFAULT);
-
-	return pte_page(*pte);
-}
-
-
 
 /**
  * Prints an array of bytes in a readable format
@@ -282,9 +246,14 @@ long hash_mem_region(struct task_struct *task, unsigned long start_address,
 		return -ENOMEM;
 
 	// Get the pages
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(4,6,3)
 	result = get_user_pages_remote(task, task->mm, start_address,
 				       page_count, 0, 1, pages, NULL);
-
+#else
+	int lock = 0;
+	result = get_user_pages_remote(task, task->mm, start_address,
+		page_count, 0, pages, NULL, &lock);
+#endif
 	if (IS_ERR_VALUE(result))
 		goto out_free_pages;
 
@@ -350,8 +319,14 @@ long read_mem_region(struct task_struct *task, unsigned long start_address,
 		return -ENOMEM;
 
 	// Get the pages
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(4,6,3)
 	result = get_user_pages_remote(task, task->mm, start_address,
 				       page_count, 0, 1, pages, NULL);
+#else
+	int lock = 0;
+	result = get_user_pages_remote(task, task->mm, start_address,
+		page_count, 0, pages, NULL, &lock);
+#endif
 
 	if (IS_ERR_VALUE(result))
 		goto out_free_pages;
@@ -412,8 +387,8 @@ void print_pslist(struct task_struct *task, int level, char *buf)
 	if (mm) {
 		// Print PGD value
 		snprintf(buf, PAGE_SIZE, "%s%*sPGD: %p [%llx]\n", buf,
-			2 * (level + 1), "", pgd_val(mm->pgd),
-			*pgd_val(mm->pgd));
+			 2 * (level + 1), "", pgd_val(mm->pgd),
+			 *pgd_val(mm->pgd));
 		// Print code and data segment location
 		snprintf(buf, PAGE_SIZE,
 			 "%s%*sCode: %lx-%lx, Data: %lx-%lx\n", buf,
@@ -559,7 +534,7 @@ err_free_hash:
 	snprintf(buf, PAGE_SIZE, "%sCmdline: %lx (%ld bytes)\n", buf,
 		 mm->arg_start, mm->arg_end - mm->arg_start);
 	snprintf_chararray(buf, PAGE_SIZE, path_buf,
-				    arg_end - mm->arg_start);
+			   arg_end - mm->arg_start);
 
 err_free_path_buf:
 	kfree(path_buf);
@@ -583,7 +558,7 @@ err_free_path_buf:
 	snprintf(buf, PAGE_SIZE, "%sEnvvars: %lx (%ld bytes)\n", buf,
 		 mm->env_start, mm->env_end - mm->env_start);
 	snprintf_chararray(buf, PAGE_SIZE, env_buf,
-				    env_end - mm->env_start);
+			   env_end - mm->env_start);
 
 err_free_env_buf:
 	kfree(env_buf);
