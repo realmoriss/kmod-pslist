@@ -202,7 +202,7 @@ long pagefault_mem_range(struct task_struct *task, unsigned long start_address,
 	user_pages = get_user_pages_remote(task, task->mm, start_address,
 					   page_count, 0, 1, NULL, NULL);
 #else
-	int lock = 0;
+	int lock = 1;
 	user_pages = get_user_pages_remote(task, task->mm, start_address,
 					   page_count, 0, NULL, NULL, &lock);
 #endif
@@ -256,7 +256,7 @@ long hash_mem_region(struct task_struct *task, unsigned long start_address,
 	result = get_user_pages_remote(task, task->mm, start_address,
 				       page_count, 0, 1, pages, NULL);
 #else
-	int lock = 0;
+	int lock = 1;
 	result = get_user_pages_remote(task, task->mm, start_address,
 				       page_count, 0, pages, NULL, &lock);
 #endif
@@ -329,7 +329,7 @@ long read_mem_region(struct task_struct *task, unsigned long start_address,
 	result = get_user_pages_remote(task, task->mm, start_address,
 				       page_count, 0, 1, pages, NULL);
 #else
-	int lock = 0;
+	int lock = 1;
 	result = get_user_pages_remote(task, task->mm, start_address,
 				       page_count, 0, pages, NULL, &lock);
 #endif
