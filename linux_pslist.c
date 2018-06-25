@@ -13,19 +13,16 @@
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Istvan Telek <moriss@realmoriss.me>");
 
-/* User defines */
 #define ALGO_NAME "sha256"
 #define ALGO_OUT_LEN 32
 #define PATH_BUF_LEN 256
 #define ENV_BUF_LEN 512
 
-/* User types */
 struct sdesc {
 	struct shash_desc shash;
 	char ctx[];
 };
 
-/* Function definitions */
 static struct sdesc *init_sdesc(struct crypto_shash *alg);
 
 int snprintf_bytearray(char *buf, unsigned long maxlen, unsigned char *arr,
@@ -59,8 +56,6 @@ static ssize_t pslist_by_pid_store(struct kobject *kobj,
 				   struct kobj_attribute *attr,
 				   const char *buf, size_t count);
 
-/* Global variables */
-//static int all_request = -1;
 static long int by_pid_request = -1;
 
 static struct kobj_attribute pslist_all_attribute = __ATTR(all, 0600,
@@ -86,7 +81,9 @@ static struct kobject *pslist_kobject;
 static struct crypto_shash *_shash_algorithm = NULL;
 static struct sdesc *_shash_desc = NULL;
 
-/* Function implementations */
+/**
+ * Initializes the hasher algorithm
+ */
 static struct sdesc *init_sdesc(struct crypto_shash *alg)
 {
 	struct sdesc *sdesc;
@@ -101,6 +98,9 @@ static struct sdesc *init_sdesc(struct crypto_shash *alg)
 	return sdesc;
 }
 
+/**
+ * Returns the global hasher
+ */
 struct sdesc *get_hasher(void)
 {
 	if (_shash_desc)
@@ -118,6 +118,9 @@ struct sdesc *get_hasher(void)
 	return _shash_desc;
 }
 
+/**
+ * Destroys the global hasher
+ */
 void destroy_hasher(void)
 {
 	if (_shash_desc) {
@@ -198,7 +201,7 @@ long pagefault_mem_range(struct task_struct *task, unsigned long start_address,
 	// This is the number of pages for the address range
 	page_count = (address_range / PAGE_SIZE) + 1;
 	// Do page fault for all pages
-#if LINUX_VERSION_CODE <= KERNEL_VERSION(4, 6, 3)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 9, 0)
 	user_pages = get_user_pages_remote(task, task->mm, start_address,
 					   page_count, 0, 1, NULL, NULL);
 #else
@@ -223,7 +226,6 @@ long hash_mem_region(struct task_struct *task, unsigned long start_address,
 		     unsigned long end_address, unsigned char *digest)
 {
 	struct sdesc *sdesc;
-	// From first page start_address to last page end_address
 	unsigned long page_count;
 	struct page **pages;
 	long result;
@@ -234,7 +236,6 @@ long hash_mem_region(struct task_struct *task, unsigned long start_address,
 	if (!task || (start_address > end_address))
 		return -EINVAL;
 
-	// Initialize hashing and make sure it is working
 	sdesc = get_hasher();
 
 	if (IS_ERR(sdesc))
@@ -246,13 +247,11 @@ long hash_mem_region(struct task_struct *task, unsigned long start_address,
 
 	page_count = ((end_address - start_address) / PAGE_SIZE) + 1;
 
-	// Reserve memory for the page structs
 	pages = kmalloc(page_count * sizeof(*pages), GFP_KERNEL);
 	if (!pages)
 		return -ENOMEM;
 
-	// Get the pages
-#if LINUX_VERSION_CODE <= KERNEL_VERSION(4, 6, 3)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 9, 0)
 	result = get_user_pages_remote(task, task->mm, start_address,
 				       page_count, 0, 1, pages, NULL);
 #else
@@ -274,13 +273,15 @@ long hash_mem_region(struct task_struct *task, unsigned long start_address,
 	else
 		// If not, calculate the length of the range on the current page
 		page_len = PAGE_SIZE - (start_address & (PAGE_SIZE - 1));
-	// Calculate the digest for the whole address range
 	for (i = 0; i < page_count; ++i) {
 		page_ptr = kmap_atomic(pages[i]);
 		if (!page_ptr) {
 			result = -EFAULT;
 			goto out_put_pages;
 		}
+		/* Since we mapped the entire page, we need to make sure to only
+		 * append relevant data
+		 */
 		result = crypto_shash_update(&sdesc->shash,
 					     &(page_ptr[start_address &
 							(PAGE_SIZE - 1)]),
@@ -310,7 +311,6 @@ out_free_pages:
 long read_mem_region(struct task_struct *task, unsigned long start_address,
 		     unsigned long end_address, unsigned char *buf)
 {
-	// From first page start_address to last page end_address
 	unsigned long page_count;
 	struct page **pages;
 	long result;
@@ -322,13 +322,12 @@ long read_mem_region(struct task_struct *task, unsigned long start_address,
 		return -EINVAL;
 
 	page_count = ((end_address - start_address) / PAGE_SIZE) + 1;
-	// Reserve memory for the page structs
+
 	pages = kmalloc(page_count * sizeof(*pages), GFP_KERNEL);
 	if (!pages)
 		return -ENOMEM;
 
-	// Get the pages
-#if LINUX_VERSION_CODE <= KERNEL_VERSION(4, 6, 3)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 9, 0)
 	result = get_user_pages_remote(task, task->mm, start_address,
 				       page_count, 0, 1, pages, NULL);
 #else
@@ -345,22 +344,27 @@ long read_mem_region(struct task_struct *task, unsigned long start_address,
 		goto out_put_pages;
 	}
 
+	// Check if the whole address range is on the first page
 	if ((start_address & ~(PAGE_SIZE - 1)) + PAGE_SIZE > end_address)
 		page_len = end_address - start_address;
 	else
 		page_len = PAGE_SIZE - (start_address & (PAGE_SIZE - 1));
-	// Calculate the digest for the whole address range
+
 	for (i = 0; i < page_count; ++i) {
 		page_ptr = kmap_atomic(pages[i]);
 		if (!page_ptr) {
 			result = -EFAULT;
 			goto out_put_pages;
 		}
+		/* Since we mapped the entire page, we need to make sure to only
+		 * append relevant data
+		 */
 		memcpy(buf, &(page_ptr[start_address & (PAGE_SIZE - 1)]),
 		       page_len);
 		buf = &(buf[page_len]);
 		kunmap_atomic(page_ptr);
 		start_address += page_len;
+		// Check if the remaining range is on the last page
 		if (start_address + PAGE_SIZE > end_address)
 			page_len = end_address - start_address;
 		else
@@ -385,11 +389,9 @@ void print_pslist(struct task_struct *task, int level, char *buf)
 {
 	struct list_head *list;
 	struct list_head *head;
-	// Memory management data of process
 	struct mm_struct *mm = task->mm;
 	struct task_struct *child;
-	// struct vm_area_struct *vma;
-	// char hash[ALGO_OUT_LEN];
+
 	// Print process id and short cmdline
 	snprintf(buf, PAGE_SIZE, "%s%*s[%u] %s\n", buf, 2 * level, "",
 		 task->pid, task->comm);
@@ -466,11 +468,10 @@ long print_taskinfo(struct task_struct *task, long pid, char *buf)
 	unsigned char *hash;
 	unsigned char *path_buf;
 	unsigned char *env_buf;
-	long result = 0;
+	long result = -ESRCH;
 	unsigned long arg_end;
 	unsigned long env_end;
 
-	// Check for valid arguments
 	if (!task || pid <= 0 || !buf)
 		return -EINVAL;
 
@@ -480,12 +481,8 @@ long print_taskinfo(struct task_struct *task, long pid, char *buf)
 		for (list = head->next; list != head; list = list->next) {
 			child = list_entry(list, struct task_struct, sibling);
 			result = print_taskinfo(child, pid, buf);
-			// If we found the process, we have nothing to do
-			if (!IS_ERR_VALUE(result))
-				return result;
 		}
-		// We haven't found any matching process.
-		return -ESRCH;
+		return result;
 	}
 
 	// Print basic task info
