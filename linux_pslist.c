@@ -492,6 +492,22 @@ long print_taskinfo(struct task_struct *task, long pid, char *buf)
 	snprintf(buf, PAGE_SIZE, "%sHeap: %lx-%lx, Mmap: %lx, Stack: %lx\n",
 		 buf, mm->start_brk, mm->brk, mm->mmap_base, mm->start_stack);
 
+	struct vm_area_struct *vma_curr;
+	for (vma_curr = mm->mmap;
+	     vma_curr != NULL; vma_curr = vma_curr->vm_next) {
+		snprintf(buf, PAGE_SIZE, "%sVMA: %lx-%lx\n", buf,
+			 vma_curr->vm_start, vma_curr->vm_end);
+		if (vma_curr->vm_file) {
+			char *pathbuf = kmalloc(sizeof(*pathbuf) * PATH_BUF_LEN,
+						GFP_KERNEL);
+			char *real_path = d_path(&vma_curr->vm_file->f_path,
+						 pathbuf, PATH_BUF_LEN);
+			snprintf(buf, PAGE_SIZE, "%sFile: %s\n", buf,
+				 real_path);
+			kfree(pathbuf);
+		}
+	}
+
 	// Print the hash of the code segment
 	hash = kmalloc(ALGO_OUT_LEN * sizeof(*hash), GFP_KERNEL);
 	if (!hash)
