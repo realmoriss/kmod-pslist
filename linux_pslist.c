@@ -268,9 +268,11 @@ long hash_mem_region(struct task_struct *task, unsigned long start_address,
 		goto out_put_pages;
 	}
 
+	// Check if the whole address range is on the first page
 	if ((start_address & ~(PAGE_SIZE - 1)) + PAGE_SIZE > end_address)
 		page_len = end_address - start_address;
 	else
+		// If not, calculate the length of the range on the current page
 		page_len = PAGE_SIZE - (start_address & (PAGE_SIZE - 1));
 	// Calculate the digest for the whole address range
 	for (i = 0; i < page_count; ++i) {
@@ -287,6 +289,7 @@ long hash_mem_region(struct task_struct *task, unsigned long start_address,
 		if (IS_ERR_VALUE(result))
 			goto out_put_pages;
 		start_address += page_len;
+		// Check if the remaining range is on the last page
 		if (start_address + PAGE_SIZE > end_address)
 			page_len = (end_address - start_address);
 		else
