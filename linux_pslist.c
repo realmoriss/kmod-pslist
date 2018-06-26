@@ -7,40 +7,17 @@
 #include <linux/mm.h>
 #include <linux/kobject.h>
 #include <linux/sysfs.h>
-#include <linux/fs_struct.h>
 #include <linux/version.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Istvan Telek <moriss@realmoriss.me>");
 
 #define ALGO_NAME "sha256"
-#define ALGO_OUT_LEN 32
-#define PATH_BUF_LEN 256
-#define ENV_BUF_LEN 512
+#define ALGO_OUT_SIZE 32
+#define PATH_BUF_SIZE 512
+#define ENV_BUF_SIZE 512
 
-struct sdesc {
-	struct shash_desc shash;
-	char ctx[];
-};
-
-static struct sdesc *init_sdesc(struct crypto_shash *alg);
-
-int snprintf_bytearray(char *buf, unsigned long maxlen, unsigned char *arr,
-		       unsigned long len);
-
-long hash_mem_region(struct task_struct *task, unsigned long start_address,
-		     unsigned long end_address, unsigned char *digest);
-
-long pagefault_mem_range(struct task_struct *task, unsigned long start_address,
-			 unsigned long end_address);
-
-void print_pslist(struct task_struct *task, int level, char *buf);
-
-long print_taskinfo(struct task_struct *task, long pid, char *buf);
-
-static int __init pslist_init(void);
-
-static void __exit pslist_exit(void);
+#define DEBUG_ON
 
 static ssize_t pslist_all_show(struct kobject *kobj,
 			       struct kobj_attribute *attr, char *buf);
@@ -56,7 +33,10 @@ static ssize_t pslist_by_pid_store(struct kobject *kobj,
 				   struct kobj_attribute *attr,
 				   const char *buf, size_t count);
 
-static long int by_pid_request = -1;
+struct sdesc {
+	struct shash_desc shash;
+	char ctx[];
+};
 
 static struct kobj_attribute pslist_all_attribute = __ATTR(all, 0600,
 							   pslist_all_show,
@@ -64,6 +44,8 @@ static struct kobj_attribute pslist_all_attribute = __ATTR(all, 0600,
 static struct kobj_attribute pslist_by_pid_attribute = __ATTR(by_pid, 0600,
 							      pslist_by_pid_show,
 							      pslist_by_pid_store);
+
+static long int by_pid_request = -1;
 
 static struct attribute *pslist_attrs[] = {
 	&pslist_all_attribute.attr,
@@ -131,25 +113,30 @@ void destroy_hasher(void)
 
 /**
  * Prints an array of bytes in a readable format
+ * @param buf pointer to a buffer where the array will be printed
+ * @param size maximum number of bytes to be used in the buffer
+ * @param arr the array which contains the data to be printed
+ * @param arr_size the size of the data array
+ * @return 0 or an error code
  */
-int snprintf_bytearray(char *buf, unsigned long maxlen, unsigned char *arr,
-		       unsigned long len)
+int snprint_bytearray(char *buf, size_t size, u8 *arr, size_t arr_size)
 {
 	char *tmp;
 	int i;
 
-	if (!arr || !buf || (len <= 0))
+	if (!arr || !buf || (arr_size <= 0))
 		return -EINVAL;
 
-	tmp = kmalloc((len * 2 + 1) * sizeof(*tmp), GFP_KERNEL);
+	// 2 characters per byte, plus the terminator
+	tmp = kmalloc((arr_size * 2 + 1) * sizeof(*tmp), GFP_KERNEL);
 	if (!tmp)
 		return -ENOMEM;
 
 	tmp[0] = '\0';
-	for (i = 0; i < len; ++i)
-		snprintf(tmp, len * 2 + 1, "%s%02hhx", tmp, arr[i]);
+	for (i = 0; i < arr_size; ++i)
+		snprintf(tmp, arr_size * 2 + 1, "%s%02hhx", tmp, arr[i]);
 
-	snprintf(buf, maxlen, "%s%s\n", buf, tmp);
+	snprintf(buf, size, "%s%s\n", buf, tmp);
 
 	kfree(tmp);
 	return 0;
@@ -158,27 +145,27 @@ int snprintf_bytearray(char *buf, unsigned long maxlen, unsigned char *arr,
 /**
  * Prints an array of characters in a readable format
  */
-int snprintf_chararray(char *buf, unsigned long maxlen, unsigned char *arr,
-		       unsigned long len)
+int snprint_chararray(char *buf, size_t size, char *arr, size_t arr_size)
 {
 	char *tmp;
 	int i;
 
-	if (!arr || !buf || (len <= 0))
+	if (!arr || !buf || (arr_size <= 0))
 		return -EINVAL;
 
-	tmp = kmalloc((len * 2 + 1) * sizeof(*tmp), GFP_KERNEL);
+	// 1 character per char, plus the terminator
+	tmp = kmalloc((arr_size + 1) * sizeof(*tmp), GFP_KERNEL);
 	if (!tmp)
 		return -ENOMEM;
 
 	tmp[0] = '\0';
-	for (i = 0; i < len; ++i) {
-		if (arr[i] == 0)
+	for (i = 0; i < arr_size; ++i) {
+		if (arr[i] == '\0')
 			arr[i] = ' ';
-		snprintf(tmp, len * 2 + 1, "%s%c", tmp, arr[i]);
+		snprintf(tmp, arr_size + 1, "%s%c", tmp, arr[i]);
 	}
 
-	snprintf(buf, maxlen, "%s%s\n", buf, tmp);
+	snprintf(buf, size, "%s%s\n", buf, tmp);
 
 	kfree(tmp);
 	return 0;
@@ -189,23 +176,24 @@ int snprintf_chararray(char *buf, unsigned long maxlen, unsigned char *arr,
  * memory. start_address and end_address are virtual addresses from the task's
  * address space. Returns 0 if all pages are loaded, or an error code (< 0)
  */
-long pagefault_mem_range(struct task_struct *task, unsigned long start_address,
-			 unsigned long end_address)
+long pagefault_task_range(struct task_struct *task, unsigned long start_address,
+			  size_t count)
 {
-	unsigned long page_count;
+	size_t page_count;
 	long user_pages;
-	unsigned long address_range = end_address - start_address;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 9, 0)
+	int lock = 1;
+#endif
 
-	if (!task || (start_address >= end_address))
+	if (!task || !count)
 		return -EINVAL;
 	// This is the number of pages for the address range
-	page_count = (address_range / PAGE_SIZE) + 1;
+	page_count = (count / PAGE_SIZE) + 1;
 	// Do page fault for all pages
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 9, 0)
 	user_pages = get_user_pages_remote(task, task->mm, start_address,
 					   page_count, 0, 1, NULL, NULL);
 #else
-	int lock = 1;
 	user_pages = get_user_pages_remote(task, task->mm, start_address,
 					   page_count, 0, NULL, NULL, &lock);
 #endif
@@ -222,18 +210,19 @@ long pagefault_mem_range(struct task_struct *task, unsigned long start_address,
 /**
  * Calculates a digest for a given memory region of a task's virtual memory.
  */
-long hash_mem_region(struct task_struct *task, unsigned long start_address,
-		     unsigned long end_address, unsigned char *digest)
+long hash_task_vmem(struct task_struct *task, unsigned long start_address,
+		    size_t count, u8 *digest)
 {
 	struct sdesc *sdesc;
-	unsigned long page_count;
 	struct page **pages;
+	size_t page_count;
+	size_t page_size;
+	size_t page_offset;
+	u8 *page_ptr;
 	long result;
-	unsigned long page_len;
 	int i;
-	unsigned char *page_ptr;
 
-	if (!task || (start_address > end_address))
+	if (!task || !count)
 		return -EINVAL;
 
 	sdesc = get_hasher();
@@ -245,7 +234,7 @@ long hash_mem_region(struct task_struct *task, unsigned long start_address,
 	if (IS_ERR_VALUE(result))
 		return result;
 
-	page_count = ((end_address - start_address) / PAGE_SIZE) + 1;
+	page_count = (count / PAGE_SIZE) + 1;
 
 	pages = kmalloc(page_count * sizeof(*pages), GFP_KERNEL);
 	if (!pages)
@@ -267,13 +256,18 @@ long hash_mem_region(struct task_struct *task, unsigned long start_address,
 		goto out_put_pages;
 	}
 
-	// Check if the whole address range is on the first page
-	if ((start_address & ~(PAGE_SIZE - 1)) + PAGE_SIZE > end_address)
-		page_len = end_address - start_address;
-	else
-		// If not, calculate the length of the range on the current page
-		page_len = PAGE_SIZE - (start_address & (PAGE_SIZE - 1));
 	for (i = 0; i < page_count; ++i) {
+		page_offset = start_address & (PAGE_SIZE - 1);
+		// Check if the whole address range is on the first page
+		if (page_offset + count <= PAGE_SIZE)
+			page_size = count;
+		else
+			page_size = PAGE_SIZE - page_offset;
+#ifdef DEBUG_ON
+		printk(KERN_INFO "Start: %lx, Count: %lu, Page size: %lu, Page offset: %lx\n",
+		       start_address,
+		       count, page_size, page_offset);
+#endif
 		page_ptr = kmap_atomic(pages[i]);
 		if (!page_ptr) {
 			result = -EFAULT;
@@ -283,18 +277,13 @@ long hash_mem_region(struct task_struct *task, unsigned long start_address,
 		 * append relevant data
 		 */
 		result = crypto_shash_update(&sdesc->shash,
-					     &(page_ptr[start_address &
-							(PAGE_SIZE - 1)]),
-					     (unsigned int) page_len);
+					     &page_ptr[page_offset],
+					     (unsigned int) page_size);
 		kunmap_atomic(page_ptr);
 		if (IS_ERR_VALUE(result))
 			goto out_put_pages;
-		start_address += page_len;
-		// Check if the remaining range is on the last page
-		if (start_address + PAGE_SIZE > end_address)
-			page_len = (end_address - start_address);
-		else
-			page_len = PAGE_SIZE;
+		start_address += page_size;
+		count -= page_size;
 	}
 	result = crypto_shash_final(&sdesc->shash, digest);
 out_put_pages:
@@ -308,20 +297,21 @@ out_free_pages:
 /**
  * Reads a specified region from the task's memory into the buffer.
  */
-long read_mem_region(struct task_struct *task, unsigned long start_address,
-		     unsigned long end_address, unsigned char *buf)
+long memcpy_task_vmem(char *buf, struct task_struct *task,
+		      unsigned long start_address, size_t count)
 {
-	unsigned long page_count;
+	size_t page_count;
+	size_t page_size;
+	size_t page_offset;
+	char *page_ptr;
 	struct page **pages;
 	long result;
-	unsigned long page_len;
-	int i;
-	unsigned char *page_ptr;
+	int i = 1;
 
-	if (!task || (start_address > end_address))
+	if (!task || !count)
 		return -EINVAL;
 
-	page_count = ((end_address - start_address) / PAGE_SIZE) + 1;
+	page_count = (count / PAGE_SIZE) + 1;
 
 	pages = kmalloc(page_count * sizeof(*pages), GFP_KERNEL);
 	if (!pages)
@@ -331,9 +321,8 @@ long read_mem_region(struct task_struct *task, unsigned long start_address,
 	result = get_user_pages_remote(task, task->mm, start_address,
 				       page_count, 0, 1, pages, NULL);
 #else
-	int lock = 1;
 	result = get_user_pages_remote(task, task->mm, start_address,
-				       page_count, 0, pages, NULL, &lock);
+				       page_count, 0, pages, NULL, &i);
 #endif
 
 	if (IS_ERR_VALUE(result))
@@ -344,13 +333,18 @@ long read_mem_region(struct task_struct *task, unsigned long start_address,
 		goto out_put_pages;
 	}
 
-	// Check if the whole address range is on the first page
-	if ((start_address & ~(PAGE_SIZE - 1)) + PAGE_SIZE > end_address)
-		page_len = end_address - start_address;
-	else
-		page_len = PAGE_SIZE - (start_address & (PAGE_SIZE - 1));
-
 	for (i = 0; i < page_count; ++i) {
+		page_offset = start_address & (PAGE_SIZE - 1);
+		// Check if the whole address range is on the first page
+		if (page_offset + count <= PAGE_SIZE)
+			page_size = count;
+		else
+			page_size = PAGE_SIZE - page_offset;
+#ifdef DEBUG_ON
+		printk(KERN_INFO "Start: %lx, Count: %lu, Page size: %lu, Page offset: %lx\n",
+		       start_address,
+		       count, page_size, page_offset);
+#endif
 		page_ptr = kmap_atomic(pages[i]);
 		if (!page_ptr) {
 			result = -EFAULT;
@@ -359,16 +353,11 @@ long read_mem_region(struct task_struct *task, unsigned long start_address,
 		/* Since we mapped the entire page, we need to make sure to only
 		 * append relevant data
 		 */
-		memcpy(buf, &(page_ptr[start_address & (PAGE_SIZE - 1)]),
-		       page_len);
-		buf = &(buf[page_len]);
+		memcpy(buf, &page_ptr[page_offset], page_size);
+		buf = &buf[page_size];
 		kunmap_atomic(page_ptr);
-		start_address += page_len;
-		// Check if the remaining range is on the last page
-		if (start_address + PAGE_SIZE > end_address)
-			page_len = end_address - start_address;
-		else
-			page_len = PAGE_SIZE;
+		start_address += page_size;
+		count -= page_size;
 	}
 	result = 0;
 out_put_pages:
@@ -385,7 +374,8 @@ out_free_pages:
 * @param task the root of the process tree
 * @param level the current level of indentation
 */
-void print_pslist(struct task_struct *task, int level, char *buf)
+void snprint_pslist(char *buf, size_t size, struct task_struct *task,
+		    int level)
 {
 	struct list_head *list;
 	struct list_head *head;
@@ -393,20 +383,19 @@ void print_pslist(struct task_struct *task, int level, char *buf)
 	struct task_struct *child;
 
 	// Print process id and short cmdline
-	snprintf(buf, PAGE_SIZE, "%s%*s[%u] %s\n", buf, 2 * level, "",
+	snprintf(buf, size, "%s%*s[%u] %s\n", buf, 2 * level, "",
 		 task->pid, task->comm);
 	if (mm) {
 		// Print PGD value
-		snprintf(buf, PAGE_SIZE, "%s%*sPGD: %p [%llx]\n", buf,
+		snprintf(buf, size, "%s%*sPGD: %p [%llx]\n", buf,
 			 2 * (level + 1), "", pgd_val(mm->pgd),
 			 *pgd_val(mm->pgd));
 		// Print code and data segment location
-		snprintf(buf, PAGE_SIZE,
-			 "%s%*sCode: %lx-%lx, Data: %lx-%lx\n", buf,
+		snprintf(buf, size, "%s%*sCode: %lx-%lx, Data: %lx-%lx\n", buf,
 			 2 * (level + 1), "", mm->start_code, mm->end_code,
 			 mm->start_data, mm->end_data);
 		// Print heap location, mmap and stack base address
-		snprintf(buf, PAGE_SIZE,
+		snprintf(buf, size,
 			 "%s%*sHeap: %lx-%lx, Mmap: %lx, Stack: %lx\n", buf,
 			 2 * (level + 1), "", mm->start_brk, mm->brk,
 			 mm->mmap_base, mm->start_stack);
@@ -415,7 +404,7 @@ void print_pslist(struct task_struct *task, int level, char *buf)
 	head = &task->children;
 	for (list = head->next; list != head; list = list->next) {
 		child = list_entry(list, struct task_struct, sibling);
-		print_pslist(child, level + 1, buf);
+		snprint_pslist(buf, size, child, level + 1);
 	}
 }
 
@@ -447,7 +436,8 @@ long pagefault_pslist(struct task_struct *task)
 	if (!mm)
 		return res;
 
-	tmp_res = pagefault_mem_range(task, mm->start_code, mm->end_code);
+	tmp_res = pagefault_task_range(task, mm->start_code,
+				       mm->end_code - mm->start_code);
 	if (IS_ERR_VALUE(tmp_res))
 		res = tmp_res;
 
@@ -455,22 +445,163 @@ long pagefault_pslist(struct task_struct *task)
 }
 
 /**
+ * Prints the digest of the given task's code segment into the buffer
+ */
+long snprint_task_digest(char *buf, size_t size, struct task_struct *task)
+{
+	struct mm_struct *mm = task->mm;
+	u8 *hash;
+	long result;
+
+	if (!task || !mm)
+		return -EINVAL;
+
+	// Print the hash of the code segment
+	hash = kmalloc(ALGO_OUT_SIZE * sizeof(*hash), GFP_KERNEL);
+	if (!hash)
+		return -ENOMEM;
+
+	// Produce a digest of the code segment
+	result = hash_task_vmem(task, mm->start_code,
+				mm->end_code - mm->start_code, hash);
+	if (IS_ERR_VALUE(result)) {
+#ifdef DEBUG_ON
+		printk(KERN_INFO "err in hash_task_vmem %ld\n", result);
+#endif
+		goto err_free_hash;
+	}
+
+	// Print the digest
+	snprintf(buf, size, "%sSHA-256 sum of code segment:\n", buf);
+	snprint_bytearray(buf, size, hash, ALGO_OUT_SIZE);
+
+err_free_hash:
+	kfree(hash);
+
+	return result;
+}
+
+/**
+ * Prints the command line of the given task into the buffer
+ */
+long snprint_task_cmdline(char *buf, size_t size, struct task_struct *task)
+{
+	struct mm_struct *mm = task->mm;
+	size_t arg_size;
+	char *path_buf;
+	long result;
+
+	if (!task || !mm)
+		return -EINVAL;
+
+	// Print the cmdline of the process
+	path_buf = kmalloc(PATH_BUF_SIZE * sizeof(*path_buf), GFP_KERNEL);
+	if (!path_buf)
+		return -ENOMEM;
+
+	arg_size = mm->arg_end - mm->arg_start;
+	if (arg_size >= PATH_BUF_SIZE) {
+		arg_size = PATH_BUF_SIZE;
+	}
+
+	result = memcpy_task_vmem(path_buf, task, mm->arg_start, arg_size);
+	if (IS_ERR_VALUE(result))
+		goto err_free_path_buf;
+
+	snprintf(buf, size, "%sCmdline: %lx-%lx (%ld bytes)\n", buf,
+		 mm->arg_start, mm->arg_end, arg_size);
+	snprint_chararray(buf, size, path_buf, arg_size);
+
+err_free_path_buf:
+	kfree(path_buf);
+
+	return result;
+}
+
+/**
+ * Prints the environment variables of the given task into the buffer
+ */
+long snprint_task_envvars(char *buf, size_t size, struct task_struct *task)
+{
+	struct mm_struct *mm = task->mm;
+	char *env_buf;
+	size_t env_size;
+	long result;
+
+	if (!task || !task->mm)
+		return -EINVAL;
+
+	// Print the envvars of the process
+	env_buf = kmalloc(ENV_BUF_SIZE * sizeof(*env_buf), GFP_KERNEL);
+	if (!env_buf)
+		return -ENOMEM;
+	env_size = mm->env_end - mm->env_start;
+
+	// Do not read more than the buffer size
+	if (env_size >= ENV_BUF_SIZE) {
+		env_size = ENV_BUF_SIZE;
+	}
+
+	// Read the command line
+	result = memcpy_task_vmem(env_buf, task, mm->env_start, env_size);
+	if (IS_ERR_VALUE(result))
+		goto err_free_env_buf;
+
+	snprintf(buf, size, "%sEnvvars: %lx-%lx (%ld bytes)\n", buf,
+		 mm->env_start, mm->env_end, env_size);
+	snprint_chararray(buf, size, env_buf, env_size);
+
+err_free_env_buf:
+	kfree(env_buf);
+
+	return result;
+}
+
+/**
+ * Prints the VMA info of the given task into the buffer
+ */
+long snprint_task_vmas(char *buf, size_t size, struct task_struct *task)
+{
+	struct mm_struct *mm = task->mm;
+	struct vm_area_struct *vma;
+	char *path;
+	char *path_d;
+
+	for (vma = mm->mmap; vma != NULL; vma = vma->vm_next) {
+		snprintf(buf, size, "%sVMA: %lx-%lx\n", buf, vma->vm_start,
+			 vma->vm_end);
+		if (!vma->vm_file)
+			continue;
+
+		path = kmalloc(sizeof(*path) * PATH_BUF_SIZE, GFP_KERNEL);
+		if (!path)
+			return -ENOMEM;
+
+		path_d = d_path(&vma->vm_file->f_path, path, PATH_BUF_SIZE);
+		if (IS_ERR(path_d))
+			goto free_vma_path_buf;
+
+		snprintf(buf, size, "%sFile: %s\n", buf, path_d);
+free_vma_path_buf:
+		kfree(path);
+	}
+
+	return 0;
+}
+
+/**
  * Finds the process with the given pid by traversing the process tree starting
  * from the given task_struct. Prints information about the task into the given
  * buffer.
  */
-long print_taskinfo(struct task_struct *task, long pid, char *buf)
+long snprint_task_info(char *buf, size_t size, struct task_struct *task,
+		       long pid)
 {
-	struct list_head *list;
-	struct list_head *head;
 	struct mm_struct *mm = task->mm;
 	struct task_struct *child;
-	unsigned char *hash;
-	unsigned char *path_buf;
-	unsigned char *env_buf;
+	struct list_head *list;
+	struct list_head *head;
 	long result = -ESRCH;
-	unsigned long arg_end;
-	unsigned long env_end;
 
 	if (!task || pid <= 0 || !buf)
 		return -EINVAL;
@@ -480,110 +611,44 @@ long print_taskinfo(struct task_struct *task, long pid, char *buf)
 		head = &task->children;
 		for (list = head->next; list != head; list = list->next) {
 			child = list_entry(list, struct task_struct, sibling);
-			result = print_taskinfo(child, pid, buf);
+			result = snprint_task_info(buf, size, child, pid);
 		}
 		return result;
 	}
 
 	// Print basic task info
-	snprintf(buf, PAGE_SIZE, "%s[%u] %s\n", buf, task->pid, task->comm);
+	snprintf(buf, size, "%s[%u] %s\n", buf, task->pid, task->comm);
 
 	// If no memory management info is available, we're done.
 	if (!mm)
 		return 0;
 
 	// Print memory layout info
-	snprintf(buf, PAGE_SIZE, "%sCode: %lx-%lx, Data: %lx-%lx\n", buf,
+	snprintf(buf, size, "%sCode: %lx-%lx, Data: %lx-%lx\n", buf,
 		 mm->start_code, mm->end_code, mm->start_data, mm->end_data);
-	snprintf(buf, PAGE_SIZE, "%sHeap: %lx-%lx, Mmap: %lx, Stack: %lx\n",
+	snprintf(buf, size, "%sHeap: %lx-%lx, Mmap: %lx, Stack: %lx\n",
 		 buf, mm->start_brk, mm->brk, mm->mmap_base, mm->start_stack);
 
-	struct vm_area_struct *vma_curr;
-	for (vma_curr = mm->mmap;
-	     vma_curr != NULL; vma_curr = vma_curr->vm_next) {
-		snprintf(buf, PAGE_SIZE, "%sVMA: %lx-%lx\n", buf,
-			 vma_curr->vm_start, vma_curr->vm_end);
-		if (vma_curr->vm_file) {
-			char *pathbuf = kmalloc(sizeof(*pathbuf) * PATH_BUF_LEN,
-						GFP_KERNEL);
-			char *real_path = d_path(&vma_curr->vm_file->f_path,
-						 pathbuf, PATH_BUF_LEN);
-			snprintf(buf, PAGE_SIZE, "%sFile: %s\n", buf,
-				 real_path);
-			kfree(pathbuf);
-		}
-	}
-
-	// Print the hash of the code segment
-	hash = kmalloc(ALGO_OUT_LEN * sizeof(*hash), GFP_KERNEL);
-	if (!hash)
-		return -ENOMEM;
-
-	// Force load all pages for the task's code segment
-	result = pagefault_mem_range(task, mm->start_code, mm->end_code);
-	if (IS_ERR_VALUE(result))
-		goto err_free_hash;
-
-	// Produce a digest of the code segment
-	result = hash_mem_region(task, mm->start_code, mm->end_code, hash);
-	if (IS_ERR_VALUE(result))
-		goto err_free_hash;
-
-	// Print the digest
-	snprintf(buf, PAGE_SIZE, "%sSHA-256 sum of code segment:\n", buf);
-	snprintf_bytearray(buf, PAGE_SIZE, hash, ALGO_OUT_LEN);
-
-err_free_hash:
-	// printk(KERN_INFO "Hashing done.\n");
-	kfree(hash);
-
-	// Print the cmdline of the process
-	path_buf = kmalloc(PATH_BUF_LEN * sizeof(*path_buf), GFP_KERNEL);
-	if (!path_buf)
-		return -ENOMEM;
-	arg_end = mm->arg_end;
-
-	// Do not read more than the buffer size
-	if ((arg_end - mm->arg_start) >= PATH_BUF_LEN) {
-		arg_end = mm->arg_start + PATH_BUF_LEN - 1;
-	}
-
-	// Read the command line
-	result = read_mem_region(task, mm->arg_start, arg_end, path_buf);
-	if (IS_ERR_VALUE(result))
-		goto err_free_path_buf;
-
-	snprintf(buf, PAGE_SIZE, "%sCmdline: %lx (%ld bytes)\n", buf,
-		 mm->arg_start, mm->arg_end - mm->arg_start);
-	snprintf_chararray(buf, PAGE_SIZE, path_buf,
-			   arg_end - mm->arg_start);
-
-err_free_path_buf:
-	kfree(path_buf);
-
-	// Print the envvars of the process
-	env_buf = kmalloc(ENV_BUF_LEN * sizeof(*env_buf), GFP_KERNEL);
-	if (!env_buf)
-		return -ENOMEM;
-	env_end = mm->env_end;
-
-	// Do not read more than the buffer size
-	if ((env_end - mm->env_start) >= ENV_BUF_LEN) {
-		env_end = mm->env_start + ENV_BUF_LEN - 1;
-	}
-
-	// Read the command line
-	result = read_mem_region(task, mm->env_start, env_end, env_buf);
-	if (IS_ERR_VALUE(result))
-		goto err_free_env_buf;
-
-	snprintf(buf, PAGE_SIZE, "%sEnvvars: %lx (%ld bytes)\n", buf,
-		 mm->env_start, mm->env_end - mm->env_start);
-	snprintf_chararray(buf, PAGE_SIZE, env_buf,
-			   env_end - mm->env_start);
-
-err_free_env_buf:
-	kfree(env_buf);
+	// Print VMA info
+	result = snprint_task_vmas(buf, size, task);
+#ifdef DEBUG_ON
+	printk(KERN_INFO "VMA result: %ld\n", result);
+#endif
+	// Print the code segment digest
+	result = snprint_task_digest(buf, size, task);
+#ifdef DEBUG_ON
+	printk(KERN_INFO "Digest result: %ld\n", result);
+#endif
+	// Print the process command line
+	result = snprint_task_cmdline(buf, size, task);
+#ifdef DEBUG_ON
+	printk(KERN_INFO "Cmdline result: %lu\n", result);
+#endif
+	// Print the environment variables
+	result = snprint_task_envvars(buf, size, task);
+#ifdef DEBUG_ON
+	printk(KERN_INFO "Envvar result: %lu\n", result);
+#endif
 
 	return result;
 }
@@ -593,7 +658,7 @@ static ssize_t pslist_all_show(struct kobject *kobj,
 			       struct kobj_attribute *attr, char *buf)
 {
 	snprintf(buf, PAGE_SIZE, "Process tree:\n");
-	print_pslist(&init_task, 0, buf);
+	snprint_pslist(buf, PAGE_SIZE, &init_task, 0);
 	return strlen(buf);
 }
 
@@ -610,7 +675,7 @@ static ssize_t pslist_by_pid_show(struct kobject *kobj,
 				  struct kobj_attribute *attr, char *buf)
 {
 	buf[0] = '\0';
-	print_taskinfo(&init_task, by_pid_request, buf);
+	snprint_task_info(buf, PAGE_SIZE, &init_task, by_pid_request);
 	return strlen(buf);
 }
 
@@ -626,7 +691,6 @@ static ssize_t pslist_by_pid_store(struct kobject *kobj,
 static int __init pslist_init(void)
 {
 	int error = 0;
-	// Create sysfs for all
 	pslist_kobject = kobject_create_and_add("pslist", kernel_kobj);
 	if (!pslist_kobject)
 		return -ENOMEM;
